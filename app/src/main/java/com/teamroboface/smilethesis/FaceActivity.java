@@ -39,25 +39,20 @@ import android.widget.ProgressBar;
 import com.teamroboface.smilethesis.R;
 import com.teamroboface.smilethesis.EmotionalFace.Emotion;
 
-
 public class FaceActivity extends Activity implements TextToSpeech.OnInitListener, SensorEventListener {
 
     private double speechPitch;
     private double speechRate;
     private static ImageView imgvw;
     private static Emotion currentEmotion;
-    private String currentResponse;
     private long timeCompletedSpeaking;
     private TextToSpeech tts;
-    private View speakButton;
-    private SpeechRecognizer speechRecogNormal;
-    private SpeechRecognizer speechRecogLearn;
-    private SpeechRecognizer speechRecogCommand;
-    private SpeechRecognizer speechRecogConvo;
+    private SpeechRecognizer speechRecog;
     private BluetoothService bluetooth;
     private ProgressBar progress;
     private ToneGenerator tone;
     private boolean isListening;
+    private listenerNormal normalListener;
     private listenerLearn learnListener;
     private listenerCommand commandListener;
     private listenerConvo convoListener;
@@ -111,39 +106,22 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             speakOut("Error loading saved responses from memory.");
         }
         currentEmotion = Emotion.NEUTRAL;
-        currentResponse = "";
         int initialExpression = EmotionalFace.transitions[currentEmotion.ordinal()][currentEmotion.ordinal()];
         imgvw.setBackgroundResource(initialExpression);
         AnimationDrawable initialanimation = (AnimationDrawable) imgvw.getBackground();
         initialanimation.start();
 
 		/*
-		 * Create speech recognizer for normal listening
+		 * Create speech recognizer and listeners for each mode
+		 * Set first listener as normal
 		 */
         isListening = false;
-        speechRecogNormal = SpeechRecognizer.createSpeechRecognizer(this);
-        speechRecogNormal.setRecognitionListener(new listenerNormal());
-
-		/*
-		 * Create speech recognizer for learning listening
-		 */
+        normalListener = new listenerNormal();
         learnListener = new listenerLearn();
-        speechRecogLearn = SpeechRecognizer.createSpeechRecognizer(this);
-        speechRecogLearn.setRecognitionListener(learnListener);
-
-		/*
-		 * Create speech recognizer for command mode listening
-		 */
         commandListener = new listenerCommand();
-        speechRecogCommand = SpeechRecognizer.createSpeechRecognizer(this);
-        speechRecogCommand.setRecognitionListener(commandListener);
-
-        /*
-		 * Create speech recognizer for conversation mode listening
-		 */
         convoListener = new listenerConvo();
-        speechRecogConvo = SpeechRecognizer.createSpeechRecognizer(this);
-        speechRecogConvo.setRecognitionListener(convoListener);
+        speechRecog = SpeechRecognizer.createSpeechRecognizer(this);
+        speechRecog.setRecognitionListener(normalListener);
 
         /*
          * Create bluetooth service instance for activation if enter conversation mode
@@ -160,22 +138,21 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
 		/*
 		 *  Create button so that a tap anywhere on the face starts normal listening
 		 */
-        speakButton = findViewById(R.id.animationImage);
+        View speakButton = findViewById(R.id.animationImage);
         speakButton.setEnabled(true);
         speakButton.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
 				/* **************** TO DISABLE CONVERSATION INTERFACE, COMMENT OUT THIS BLOCK ************/
                 if (isListening) {
-                    speechRecogNormal.cancel();						// If currently listening, cancel listening
-                    speechRecogLearn.cancel();
-                    speechRecogCommand.cancel();
-                    speechRecogConvo.cancel();
+                    speechRecog.stopListening();
+                    speechRecog.cancel();
                     learnListener.setStep(0);
                     convoListener.setStep(0);
                     isListening = false;
                     progress.setProgress(100);
                 } else if (System.currentTimeMillis() - timeCompletedSpeaking > 750) {	// don't respond to any touches noticed while app is busy speaking
-                    startListening(speechRecogNormal);				// this starts the activity for normal listening (i.e. not learning new words)
+                    speechRecog.setRecognitionListener(normalListener);
+                    startListening();				// this starts the activity for normal listening (i.e. not learning new words)
                 }
  				/* ****************************************************************************************/
             }
@@ -194,7 +171,7 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
     /**----------------------------------------------------------------------------------------------
      * Helper method starts the speech listening activity for the passed speech recognizer.
      */
-    private void startListening (SpeechRecognizer speechRecog) {
+    private void startListening () {
         while (tts.isSpeaking()){
             // Do nothing while TTS is speaking.
         }
@@ -215,6 +192,8 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
      */
     class listenerNormal implements RecognitionListener
     {
+        private int numError7s = 0;
+
         // Implement non-needed methods as empty methods.
         public void onReadyForSpeech(Bundle params) {}
         public void onPartialResults(Bundle partialResults) {}
@@ -238,20 +217,35 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             }
         }
 
-        // When voice timeout, unrecognizeable speech, or audio recording error is encountered,
+        // When voice timeout, unrecognizeable speech, audio recording error, or "recognizer busy" error is encountered,
         // play tone and start listening again.  For all other errors, announce error number and stop
         // recognition cycle.
         public void onError(int error)
         {
+            Log.d("ERRR", "this is the error number: " + error);
+            speechRecog.cancel();
             isListening = false;
             progress.setProgress(100);
-            if ((error == 6) || (error == 7) || (error == 3)) {
-                tone.startTone(ToneGenerator.TONE_PROP_NACK);
-                SystemClock.sleep(250);
-                startListening(speechRecogNormal);
-            } else {
-                currentResponse = "Recognizer error number " + error;
-                animate(Emotion.CONFUSED);
+            switch (error) {
+                case 8: // ERROR_RECOGNIZER_BUSY comes at beginning of request - still goes on to listen. I think. Do nothing.
+                    //break;
+                case 7: // ERROR_NO_MATCH comes two at a time for some reason. Only respond to second.
+                    if (numError7s == 0) {
+                        numError7s++;
+                        break;
+                    } else {
+                        numError7s = 0;
+                    }
+                case 3: // ERROR_AUDIO
+                case 6: // ERROR_SPEECH_TIMEOUT
+                    tone.startTone(ToneGenerator.TONE_PROP_NACK);
+                    SystemClock.sleep(500);
+                    startListening();
+                    break;
+                default:
+                    SystemClock.sleep(500);
+                    animateAndSpeak(Emotion.CONFUSED, "Network connectivity error number " + error);
+                    break;
             }
         }
 
@@ -285,10 +279,16 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
                 }
             }
 
-
-
             // Now animate the appropriate expression for the FIRST keyword/phrase on the list (maybe later we'll figure out something to do with the rest)
-            if (!topHit.equals("stop")) {
+            if (topHit.equals("stop")) {
+                // If "stop" is recognized, fill the progress bar, generate a low tone, and stop listening.
+                progress.setProgress(100);
+                tone.startTone(ToneGenerator.TONE_PROP_NACK);
+            } else {
+                // Default: If no keyword recognized, repeat back the entire speech input and start listening again immediately afterward.
+                Emotion animateTo = currentEmotion;
+                String say = topHit;
+                RecognitionListener modeToListen = normalListener;
 
                 // GOTCHA: if defining any hard-coded commands here (as in "learn" or "clear memory"),
                 // these keys must also be hard-coded in the keyword lists or saved files.
@@ -296,100 +296,59 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
 
                     // Keyword "Learn" starts learning speech listener
                     if (phrasesPresent.get(0).equals("learn")) {
-                        final Handler handler = new Handler();
-                        final Runnable runnable = new Runnable() {
-                            public void run() {
-                                startListening(speechRecogLearn);
-                            }
-                        };
-                        currentResponse = "Okay, teach me something.";
-                        animate(Emotion.HAPPY); //animate to happy
-                        handler.postDelayed(runnable, 250); // start listening for learn protocol only AFTER animation and tts response are done
+                        modeToListen = learnListener;
+                        animateTo = Emotion.HAPPY;
+                        say = "Okay, teach me something.";
 
                         // Keyword "Clear memory" clears saved files of all added keywords, not including hard-coded ones.
                     } else if (phrasesPresent.get(0).equals("clear memory")) {
-                        final Handler handler = new Handler();
-                        final Runnable runnable = new Runnable() {
-                            public void run() {
-                                startListening(speechRecogNormal);
-                            }
-                        };
-                        currentResponse = "Okay, clearing memory";
                         clearMemory();
-                        animate(Emotion.NEUTRAL);		//animate to neutral
-                        handler.postDelayed(runnable, 250); // start listening again normally after finished speaking.
+                        animateTo = Emotion.NEUTRAL;
+                        say = "Okay, clearing memory";		//animate to neutral
 
                         // Keyword "Command mode" starts command listener, so that robot can be controlled by voice commands.
                     } else if (phrasesPresent.get(0).equals("command mode")) {
-                        final Handler handler = new Handler();
-                        final Runnable runnable = new Runnable() {
-                            public void run() {
-                                startListening(speechRecogCommand);
-                            }
-                        };
-                        currentResponse = "Entering command mode.";
-                        animate(Emotion.HAPPY); //animate to happy
-                        handler.postDelayed(runnable, 250); // start listening for command protocol only AFTER animation and tts response are done
+                        modeToListen = commandListener;
+                        animateTo = Emotion.HAPPY;
+                        say = "Entering command mode.";
 
                         // Keyword "Conversation mode" starts conversation listener, so that robot can interact with topic detector.
                     } else if (phrasesPresent.get(0).equals("conversation mode")) {
-                        final Handler handler = new Handler();
-                        final Runnable runnable = new Runnable() {
-                            public void run() {
-                                startListening(speechRecogConvo);
-                            }
-                        };
-                        currentResponse = "Okay. Loading conversation mode. What subject should we talk about?";
-                        // TODO: debug bluetooth starting stuff here
-                        //bluetooth.write("new");// When app is client not server, here will need to be a command to start up query handler
-                        animate(Emotion.HAPPY); //animate to happy
-                        handler.postDelayed(runnable, 250); // start listening for conversation protocol only AFTER animation and tts response are done
-
+                        modeToListen = convoListener;
+                        animateTo = Emotion.NEUTRAL;
+                        say = "Okay, loading conversation mode. What condition number?";
 
                         // Keyword "Camera mode" sets animation to be only happy, no blinking, until camera mode is exited.
                     } else if (phrasesPresent.get(0).equals("camera mode")){
                         if (cameraMode) {
-                            final Handler handler = new Handler();
-                            final Runnable runnable = new Runnable() {
-                                public void run() {
-                                    startListening(speechRecogNormal);
-                                }
-                            };
                             cameraMode = false;
-                            currentResponse = "Exiting camera mode";
-                            currentEmotion = Emotion.HAPPY;
-                            animate(Emotion.NEUTRAL);
-                            handler.postDelayed(runnable, 250);	// Start listening again when camera mode exited
+                            animateTo = Emotion.NEUTRAL;
+                            say = "Exiting camera mode";
                         } else {
-                            currentResponse = "Entering camera mode";
                             cameraMode = true;
-                            animate(Emotion.HAPPY);
+                            animateTo = Emotion.HAPPY;
+                            say = "Entering camera mode";
                         }
 
                         // All other keywords are dealt with here.
                     } else {
-                        final Handler handler = new Handler();
-                        final Runnable runnable = new Runnable() {
-                            public void run() {
-                                startListening(speechRecogNormal);
-                            }
-                        };
-                        currentResponse = face.responseDictionary.get(phrasesPresent.get(0)); //get the response if ones exists for this phrase, to speak when animation done
-                        animate(face.wordDictionary.get(phrasesPresent.get(0))); //animate to the expression indicated by the emotion(value) that matches this string(key)
-                        handler.postDelayed(runnable, 250); // start listening again only after animation and tts response are done
+                        //animate to the expression indicated by the emotion(value) that matches this string(key)
+                        animateTo = face.wordDictionary.get(phrasesPresent.get(0));
+                        //get the response if ones exists for this phrase, to speak when animation done
+                        say = face.responseDictionary.get(phrasesPresent.get(0));
                     }
-
-                    // If no keyword recognized, repeat back the entire speech input and start listening again immediately afterward.
-                } else {
-                    speakOut(topHit);
-                    Log.d("THIS WAS HEARD: ", topHit);
-                    startListening(speechRecogNormal);
                 }
 
-                // If "stop" is recognized, fill the progress bar, generate a low tone, and stop listening.
-            } else {
-                progress.setProgress(100);
-                tone.startTone(ToneGenerator.TONE_PROP_NACK);
+                final Handler handler = new Handler();
+                final RecognitionListener mode = modeToListen;
+                final Runnable runnable = new Runnable() {
+                    public void run() {
+                        speechRecog.setRecognitionListener(mode);
+                        startListening();
+                    }
+                };
+                animateAndSpeak(animateTo, say); //animate to happy
+                handler.postDelayed(runnable, 500); // start listening for learn protocol only AFTER animation and tts response are done
             }
         }
 
@@ -411,6 +370,7 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
         // This is the step counter variable.  It is advanced when a step of the protocol is successfully
         // completed, and reset when protocol is completed or broken.
         private int step;
+        private int numError7s = 0;
         public void setStep(int set) {		// Used if need to start on specific step of protocol out of order.
             step = set;
         }
@@ -440,22 +400,36 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             }
         }
 
-        // When voice timeout, unrecognized speech, or audio recording error are encountered,
+        // When voice timeout, unrecognizeable speech, audio recording error, or "recognizer busy" error is encountered,
         // do not advance protocol step; instead, ask for user to repeat what they just said.
         // For all other errors, announce error number and cancel learn protocol.
         public void onError(int error)
         {
+            Log.d("ERRR", "this is the error number: " + error);
+            speechRecog.cancel();
             isListening = false;
             progress.setProgress(100);
-            if ((error == 6) || (error == 7) || (error == 3)) {
-                speakOut("Sorry, can you repeat that?");
-                SystemClock.sleep(250);
-                startListening(speechRecogLearn);
-            } else {								// For all other errors, announce error number and stop listening.
-                currentResponse = "Recognizer error number " + error;
-                step = 0;
-                toBeLearned = "";
-                animate(Emotion.CONFUSED);
+            switch (error) {
+                case 8: // ERROR_RECOGNIZER_BUSY comes at beginning of request - still goes on to listen. I think. Do nothing.
+                    //break;
+                case 7: // ERROR_NO_MATCH comes two at a time for some reason. Only respond to second.
+                    if (numError7s == 0) {
+                        numError7s++;
+                        break;
+                    } else {
+                        numError7s = 0;
+                    }
+                case 3: // ERROR_AUDIO
+                case 6: // ERROR_SPEECH_TIMEOUT
+                    tone.startTone(ToneGenerator.TONE_PROP_NACK);
+                    animateAndSpeak(currentEmotion, "Sorry, can you repeat that?");
+                    SystemClock.sleep(500);
+                    startListening();
+                    break;
+                default:
+                    SystemClock.sleep(500);
+                    animateAndSpeak(Emotion.CONFUSED, "Network connectivity error number " + error);
+                    break;
             }
         }
 
@@ -468,78 +442,74 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION); // Get list of phrases that are possible hits from voice recognizer
             String topHit = matches.get(0).toLowerCase(Locale.ENGLISH); // Only use the top hit, and control for case sensitivity - RESTRICTED TO ENGLISH LANGUAGE
 
-            // If the user says stop, don't continue the protocol.
-            if (!topHit.equalsIgnoreCase("stop")) {
+            if (topHit.equalsIgnoreCase("stop")) {
+                // If user says "stop," cancel protocol and stop listening.
+                step = 0;
+                toBeLearned = "";
+                progress.setProgress(100);
+                tone.startTone(ToneGenerator.TONE_PROP_NACK);
+
+            } else {
+
+                Emotion animateTo = Emotion.HAPPY;
+                String say = "";
+                RecognitionListener modeToListen = learnListener;
 
                 switch (step) {
 
                     case 0: // STEP ONE: SAVE NEW KEYWORD
                         toBeLearned = topHit;//saves the new word for putting it in the dictionary later
-                        speakOut(topHit + "...  How does that make me feel?");
+                        say = topHit + "...  How does that make me feel?";
                         step = 1;
                         break;
 
                     case 1: // STEP TWO: SAVE ASSOCIATED EMOTION
                         try {
                             Emotion emotion = face.getEmotionKey(topHit);
-                            if (currentEmotion != Emotion.HAPPY)		// If current expression was confused, now go back to happy
-                                animate(Emotion.HAPPY);
                             if (emotion != null) {				// Save emotion. Or if keyword was "nothing," just advance protocol without saving any response.
                                 face.wordDictionary.put(toBeLearned, emotion);    // Match the keyword from step one with the emotion and save them.
                                 saveWord();
                             }
-                            speakOut("Okay, got it. What should I say to that?");
+                            say = "Okay, got it. What should I say to that?";
                             step = 2;
                         }
                         catch(Exception e) {				// Expression was not recognized, need to get a valid expression word.
-                            currentResponse = "Whoops, can you say another expression?";
-                            animate(Emotion.CONFUSED);	//animate confused face
+                            say = "Whoops, can you say another expression?";
+                            animateTo = Emotion.CONFUSED;	//animate confused face
                         }
                         break;
 
                     case 2: // STEP THREE: SAVE ASSOCIATED VERBAL RESPONSE
-                        if(!topHit.equals("nothing") && !topHit.equalsIgnoreCase("I don't know")){
-                            speakOut("Okay, I'll say, " + topHit);		// "I don't know" and "nothing" are assumed to mean "don't save a response, just an expression"
+                        if(topHit.equals("nothing") || topHit.equalsIgnoreCase("I don't know")) {
+                            say = "Okay, I won't say anything.";
+                        } else {
+                            say = "Okay, I'll say, " + topHit;		// "I don't know" and "nothing" are assumed to mean "don't save a response, just an expression"
                             face.responseDictionary.put(toBeLearned, topHit);	// Match keyword from step one with response and save them.
                             saveResponse();
                         }
-                        step = 3;
+                        modeToListen = normalListener;
+                        step = 0;
                         break;
 
                     default:	// In the unlikely event that an invalid step number is passed, exit the protocol.
                         speakOut("Whoops! Exiting learn.");
-                        step = 3;
+                        modeToListen = normalListener;
+                        step = 0;
                         break;
 
                 }
 
                 // Now either start listening for learn again or reset protocol step and start listening for normal speech.
-                if (step < 3) {
-                    final Handler handler = new Handler();
-                    final Runnable runnable = new Runnable() {
-                        public void run() {
-                            startListening(speechRecogLearn);
-                        }
-                    };
-                    handler.postDelayed(runnable, 180);	// Start listening only after tts and animations have finished.
-                } else {
-                    step = 0;		// Resets protocol so that next time it starts over at the beginning.
-                    toBeLearned = "";
-                    final Handler handler = new Handler();
-                    final Runnable runnable = new Runnable() {
-                        public void run() {
-                            startListening(speechRecogNormal);
-                        }
-                    };
-                    handler.postDelayed(runnable, 180);	// Start listening only after tts and animations have finished.
-                }
-
-                // If user says "stop," cancel protocol and stop listening.
-            } else {
-                step = 0;
-                toBeLearned = "";
-                progress.setProgress(100);
-                tone.startTone(ToneGenerator.TONE_PROP_NACK);
+                final Handler handler = new Handler();
+                final RecognitionListener mode = modeToListen;
+                final Runnable runnable = new Runnable() {
+                    public void run() {
+                        speechRecog.setRecognitionListener(mode);
+                        startListening();
+                    }
+                };
+                animateAndSpeak(animateTo, say); //animate to happy
+                handler.postDelayed(runnable, 500); // start listening for learn protocol only AFTER animation and tts response are done
             }
 
         }
@@ -557,6 +527,8 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
      */
     class listenerCommand implements RecognitionListener
     {
+        private int numError7s = 0;
+
         // Implement non-needed methods as empty methods.
         public void onReadyForSpeech(Bundle params) {}
         public void onPartialResults(Bundle partialResults) {}
@@ -580,18 +552,34 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             }
         }
 
-        // When voice timeout, unrecognized speech, or audio recording error are encountered,
+        // When voice timeout, unrecognizeable speech, audio recording error, or "recognizer busy" error is encountered,
         // start listening again - probably just heard robot moving.
         public void onError(int error)
         {
+            Log.d("ERRR", "this is the error number: " + error);
+            speechRecog.cancel();
             isListening = false;
             progress.setProgress(100);
-            if ((error == 6) || (error == 7) || (error == 3)) {
-                SystemClock.sleep(250);
-                startListening(speechRecogCommand);
-            } else {								// For all other errors, announce error number and stop listening.
-                currentResponse = "Recognizer error number " + error;
-                animate(Emotion.CONFUSED);
+            switch (error) {
+                case 8: // ERROR_RECOGNIZER_BUSY comes at beginning of request - still goes on to listen. I think. Do nothing.
+                    //break;
+                case 7: // ERROR_NO_MATCH comes two at a time for some reason. Only respond to second.
+                    if (numError7s == 0) {
+                        numError7s++;
+                        break;
+                    } else {
+                        numError7s = 0;
+                    }
+                case 3: // ERROR_AUDIO
+                case 6: // ERROR_SPEECH_TIMEOUT
+                    tone.startTone(ToneGenerator.TONE_PROP_NACK);
+                    SystemClock.sleep(500);
+                    startListening();
+                    break;
+                default:
+                    SystemClock.sleep(500);
+                    animateAndSpeak(Emotion.CONFUSED, "Network connectivity error number " + error);
+                    break;
             }
         }
 
@@ -606,67 +594,66 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             String topHit = matches.get(0).toLowerCase(Locale.ENGLISH); // Only use the top hit, and control for case sensitivity - RESTRICTED TO ENGLISH LANGUAGE
 
             // Only continue if the top hit is not "stop" or "exit".
-            if (!topHit.equals("stop") && !topHit.equals("exit")) {
+            if (topHit.equals("stop"))
+            {
+                // For consistency's sake, if user says "stop", fill the progress bar and stop listening.
+                progress.setProgress(100);
+                tone.startTone(ToneGenerator.TONE_PROP_NACK);
+            }
+            else {
+                // Default: say back whatever is said, if it's not a command.
+                Emotion animateTo = Emotion.HAPPY;
+                String say = topHit;
+                RecognitionListener modeToListen = commandListener;
 
-                // Take care of commonly mismatched word "kik", for "kick"
-                String commandMessage = "";
-                if (topHit.equals("kik"))
+                if (topHit.equals("exit"))
                 {
-                    commandMessage = "kick";
+                    // If user says "exit", say "Exiting command mode" and start listening normally instead.
+                    say = "Exiting Command Mode.";
+                    modeToListen = normalListener;
                 }
-                else
-                {
-                    commandMessage = topHit;
-                }
+                else {
+                    String commandMessage = "";
 
-                //For any recognized command, send it to the robot for execution.
-                if 		(commandMessage.equals("stand")
-                        || commandMessage.equals("walk")
-                        || commandMessage.equals("kick")
-                        || commandMessage.equals("track")
-                        || commandMessage.equals("relax")
-                        || commandMessage.equals("engage"))
-                {
-                    speakOut("Okay, I'll " + commandMessage);
-                    new Thread(new ClientThread(commandMessage, ROBOT_PORT, ROBOT_IP)).start(); //put the command in the socket
+                    // Take care of commonly mismatched word "kik", for "kick"
+                    if (topHit.equals("kik")) {
+                        commandMessage = "kick";
+                    } else {
+                        commandMessage = topHit;
+                    }
+
+                    //For any recognized command, send it to the robot for execution.
+                    if (commandMessage.equals("stand")
+                            || commandMessage.equals("walk")
+                            || commandMessage.equals("kick")
+                            || commandMessage.equals("track")
+                            || commandMessage.equals("relax")
+                            || commandMessage.equals("engage")) {
+                        say = "Okay, I'll " + commandMessage;
+                        new Thread(new ClientThread(commandMessage, ROBOT_PORT, ROBOT_IP)).start(); //put the command in the socket
+                    }
                 }
 
                 // If no recognized command, ask user to try again.
+                //else
+                //{
+                    //new Thread(new ClientThread(topHit, ROBOT_PORT, ROBOT_IP)).start(); //put the command in the socket
+					//speakOut("Sorry, can you repeat that?");
+                //}
 
-                else
-                {
-                    speakOut(topHit);
-                    new Thread(new ClientThread(topHit, ROBOT_PORT, ROBOT_IP)).start(); //put the command in the socket
-//					speakOut("Sorry, can you repeat that?");
-                }
 
-                // Then, start listening for another command.
+                // Now either start listening for command again or exit and start listening for normal speech.
                 final Handler handler = new Handler();
+                final RecognitionListener mode = modeToListen;
                 final Runnable runnable = new Runnable() {
                     public void run() {
-                        startListening(speechRecogCommand);
+                        speechRecog.setRecognitionListener(mode);
+                        startListening();
                     }
                 };
-                handler.postDelayed(runnable, 250);	// Start listening only after tts and animations have finished.
+                animateAndSpeak(animateTo, say); //animate
+                handler.postDelayed(runnable, 500); // start listening only AFTER animation and tts response are done
 
-
-                // If user says "exit", say "Exiting command mode" and start listening normally instead.
-            }
-            else if (topHit.equals("exit")) {
-                speakOut("Exiting Command Mode.");
-                final Handler handler = new Handler();
-                final Runnable runnable = new Runnable() {
-                    public void run() {
-                        startListening(speechRecogNormal);
-                    }
-                };
-                handler.postDelayed(runnable, 250);	// Start listening only after tts and animations have finished.
-
-                // For consistency's sake, if user says "stop", fill the progress bar and stop listening.
-            }
-            else {
-                progress.setProgress(100);
-                tone.startTone(ToneGenerator.TONE_PROP_NACK);
             }
 
         }
@@ -698,27 +685,19 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
                 "According to you, which is worse: gossiping, smoking, drinking alcohol or caffeine excessively, overeating, or not exercising?",
                 "Do you watch reality shows on TV? If so, which one or ones? Why do you think that reality based television programming, shows like \"Survivor\" or \"Who Wants to Marry a Millionaire\" are so popular?",
                 "Do you have a favorite holiday? Why? If you could create a holiday, what would it be and how would you have people celebrate it?"};
-
-        private String[] keepGoing = {"Go on", "interesting", "oh wow"};
-        private String[] replyTemplates = { "It sounds like you're talking about <topic>.",
-                "That sounds interesting. Please tell me more about <topic>!",
-                "How do you feel about <topic>?",
-                "Is <topic> related to that?",
-                "<topic> sounds like a big subject.",
-                "<topic> sure does sound interesting!",
-                "I don't know much about <topic>. What do you think?",
-                "How does <topic> relate to that?"};
-        private String finalReplyTemplate = "You sure know a lot about <topic>. It was nice talking with you about all that!";
+        private Emotion[] expressions = {Emotion.SAD, Emotion.NEUTRAL, Emotion.HAPPY};
 
         // Class variables to track progress through conversation
+        private int numError7s = 0;
         private int step = 0;
         public void setStep(int set) {		// Used if need to start on specific step of protocol out of order.
             step = set;
         }
         private String convoTopic = "";
+        private String condition = "";
         private String query = "";
         private int replies = 0;
-        boolean prompted = false;
+        private int timeouts = 0;
         private Random rand = new Random();
 
         // Implement non-needed methods as empty methods.
@@ -744,19 +723,35 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             }
         }
 
-        // When voice timeout, unrecognized speech, or audio recording error are encountered,
+        // When voice timeout, unrecognizeable speech, audio recording error, or "recognizer busy" error is encountered,
         // start listening again - need to collect enough material for full query
         public void onError(int error)
         {
+            Log.d("ERRR", "this is the error number: " + error);
+            speechRecog.cancel();
             isListening = false;
             progress.setProgress(100);
-            if ((error == 6) || (error == 7) || (error == 3)) {
-                SystemClock.sleep(250);
-                startListening(speechRecogConvo);
-                // For all other errors, announce error number and stop listening.
-            } else {
-                currentResponse = "Recognizer error number " + error;
-                animate(Emotion.CONFUSED);
+            switch (error) {
+                case 8: // ERROR_RECOGNIZER_BUSY comes at beginning of request - still goes on to listen. I think. Do nothing.
+                    //break;
+                case 7: // ERROR_NO_MATCH comes two at a time for some reason. Only respond to second.
+                    if (numError7s == 0) {
+                        numError7s++;
+                        break;
+                    } else {
+                        numError7s = 0;
+                    }
+                case 3: // ERROR_AUDIO
+                case 6: // ERROR_SPEECH_TIMEOUT
+                    timeouts++;
+                    tone.startTone(ToneGenerator.TONE_PROP_NACK);
+                    SystemClock.sleep(500);
+                    startListening();
+                    break;
+                default:
+                    SystemClock.sleep(500);
+                    animateAndSpeak(Emotion.CONFUSED, "Network connectivity error number " + error);
+                    break;
             }
         }
 
@@ -771,137 +766,178 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             String topHit = matches.get(0).toLowerCase(Locale.ENGLISH); // Only use the top hit, and control for case sensitivity - RESTRICTED TO ENGLISH LANGUAGE
 
-            if (!topHit.equals("stop") && !topHit.equals("exit")) {
-                switch (step)
-                {
-                    case 0:
-                        if (Arrays.asList(topicLabels).contains(topHit))
-                        {
-                            convoTopic = topHit;
-                            speakOut(convoTopic);
-                            step = 1;
-                            //speakOut("Set step to 1");///////////////////////
-                        }
-                        else
-                        {
-                            speakOut("Sorry, what subject?");
-                        }
-                        break;
-                    case 1:
-                        if (topHit.equals("yes") || topHit.equals("yeah") || topHit.equals("yep"))
-                        {
-                            speakOut("Okay, it looks like we're talking about " + convoTopic + ". " + topicPrompts[Arrays.asList(topicLabels).indexOf(convoTopic)]);
-                            bluetooth.write("new");
-                            query = "";
-                            replies = 0;
-                            prompted = false;
-                            step = 2;
-                        }
-                        else if (topHit.split(" ")[0].equals("no") || topHit.split(" ")[0].equals("nope"))
-                        {
-                            String[] hits = topHit.split(" ");
-                            convoTopic = "";
-                            for (int i = 1; i < hits.length; ++i){
-                                convoTopic += hits[i] + " ";
-                            }
-                            convoTopic = convoTopic.trim();
-                            speakOut(convoTopic);
-                        }
-                        else
-                        {
-                            speakOut("Did you say yes?");
-                        }
-                        break;
-                    case 2:
-                        query += topHit + " ";
-                        if ((query.split(" ").length < 15) && (prompted == false)) {
-                            speakOut(keepGoing[rand.nextInt(keepGoing.length)]);
-                            prompted = true;
-                        } else if (query.split(" ").length >= 15) {
-                            // TODO: debug bluetooth stuff here
-                            bluetooth.write(query);/////////////
-                            String reply = bluetooth.readNext();
-                            query = "";
-                            prompted = false;
-                            if (replies < 6) {
-                                speakOut(replyTemplates[rand.nextInt(replyTemplates.length)].replace("<topic>", reply));
-                                replies++;
-                            } else {
-                                speakOut(finalReplyTemplate.replace("<topic>", reply));
-                                speakOut("Should we talk about another subject?");
-                                step = 3;
-                            }
-                        }
-                        break;
-                    case 3:
-                        if (topHit.split(" ")[0].equals("yes") || topHit.split(" ")[0].equals("yeah") || topHit.split(" ")[0].equals("yep"))
-                        {
-                            String[] hits = topHit.split(" ");
-                            for (int i = 1; i < hits.length; ++i){
-                                convoTopic += hits[i] + " ";
-                            }
-                            convoTopic = convoTopic.trim();
-                            if (Arrays.asList(topicLabels).contains(topHit))
-                            {
-                                convoTopic = topHit;
-                                speakOut(convoTopic);
-                                step = 1;
-                            }
-                            else
-                            {
-                                speakOut("Sorry, what subject?");
-                                step = 0;
-                            }
-                        }
-                        else if (topHit.equals("no") || topHit.equals("nope"))
-                        {
-                            speakOut("Okay, it was nice talking to you!");
-                            step = 4;
-                            // stop listening
-                        }
-                        break;
+            timeouts = 0;
 
-                }
-
-                // if step is less than 5, start listening in convo mode again
-                // if step is 5, reset all variables and stop listening
-                if (step < 4)
-                {
-                    final Handler handler = new Handler();
-                    final Runnable runnable = new Runnable() {
-                        public void run() {
-                            startListening(speechRecogConvo);
-                        }
-                    };
-                    handler.postDelayed(runnable, 250);	// Start listening only after tts and animations have finished.
-                }
-                else
-                {
-                    step = 0;
-                    progress.setProgress(100);
-                }
-
-
-            }
-            // If user says "exit", say "Exiting conversation mode" and start listening normally instead.
-            else if (topHit.equals("exit") || (topHit.equals("stop"))) {
-                speakOut("Exiting Conversation Mode.");
+            if (topHit.equals("stop"))
+            {
+                // For consistency's sake, if user says "stop", fill the progress bar, reset the protocol, and stop listening.
+                query = "";
+                replies = 0;
                 step = 0;
-                final Handler handler = new Handler();
-                final Runnable runnable = new Runnable() {
-                    public void run() {
-                        startListening(speechRecogNormal);
-                    }
-                };
-                handler.postDelayed(runnable, 250);	// Start listening only after tts and animations have finished.
-            }
-            // For consistency's sake, if user says "stop", fill the progress bar and stop listening.
-            else {
                 progress.setProgress(100);
                 tone.startTone(ToneGenerator.TONE_PROP_NACK);
             }
+            else {
+                Emotion animateTo = Emotion.NEUTRAL;
+                String say = "";
+                RecognitionListener modeToListen = convoListener;
+
+                if (topHit.equals("exit")) {
+                    // If user says "exit", say "Exiting conversation mode" and start listening normally instead.
+                    say = "Exiting Conversation Mode.";
+                    step = 0;
+                    modeToListen = normalListener;
+                } else {
+                    String[] hitSplit = topHit.split(" ");
+                    switch (step) {
+
+                        case 0: // conditions are 1=control, 2=topics, 3=emotions, 4=integrated
+                            if (topHit.equals("1")
+                                    || topHit.equals("2")
+                                    || topHit.equals("to")
+                                    || topHit.equals("too")
+                                    || topHit.equals("3")
+                                    || topHit.equals("4")) {
+                                condition = topHit;
+                                say = condition + "?";
+                                step = 1;
+                            } else {
+                                say = "Sorry, what condition number?";
+                            }
+                            break;
+                        case 1:
+                            switch (hitSplit[0]) {
+                                case "yes":
+                                case "yeah":
+                                case "yep":
+                                    say = "Okay, what subject should we talk about?";
+                                    step = 2;
+                                    break;
+                                case "no":
+                                case "nope":
+                                    if (hitSplit[1].equals("1")
+                                            || hitSplit[1].equals("2")
+                                            || hitSplit[1].equals("to")
+                                            || hitSplit[1].equals("too")
+                                            || hitSplit[1].equals("3")
+                                            || hitSplit[1].equals("4"))
+                                    {
+                                        condition = hitSplit[1];
+                                        say = condition + "?";
+                                    }
+                                    else
+                                    {
+                                        say = "Sorry, what condition number?";
+                                    }
+                                    break;
+                                case "1":
+                                case "2":
+                                case "to":
+                                case "too":
+                                case "3":
+                                case "4":
+                                    condition = hitSplit[0];
+                                    say = condition + "?";
+                                    break;
+                                default:
+                                    say = "Sorry, what condition number?";
+                                    break;
+
+                            }
+                            break;
+                        case 2:
+                            if (condition.equals("to") || condition.equals("too"))
+                                condition = "2";
+                            if (Arrays.asList(topicLabels).contains(topHit)) {
+                                convoTopic = topHit;
+                                say = convoTopic;
+                                step = 3;
+                            } else {
+                                say = "Sorry, what subject?";
+                            }
+                            break;
+                        case 3:
+                            switch (hitSplit[0]) {
+                                case "yes":
+                                case "yeah":
+                                case "yep":
+                                    say = "Okay, it looks like we're talking about " + convoTopic + ". " + topicPrompts[Arrays.asList(topicLabels).indexOf(convoTopic)];
+                                    bluetooth.write("new");
+                                    query = "";
+                                    replies = 0;
+                                    step = 4;
+                                    break;
+                                case "no":
+                                case "nope":
+                                    String[] hits = topHit.split(" ");
+                                    convoTopic = "";
+                                    for (int i = 1; i < hits.length; ++i) {
+                                        convoTopic += hits[i] + " ";
+                                    }
+                                    convoTopic = convoTopic.trim();
+                                    say = convoTopic + "?";
+                                    break;
+                                default:
+                                    say = "Did you say yes?";
+                                    break;
+                            }
+                            break;
+                        case 4:
+                            timeouts = 0;
+                            query += topHit + " ";
+                            if (query.split(" ").length >= 15) {
+                                Log.d("CONVERSATION", "making reply. query: " + query);
+                                if (condition.equals("1") || condition.equals("3"))//******** control or emotions condition - need to request random reply
+                                    query = "#random#" + query;
+
+                                // TODO: debug bluetooth stuff here
+                                bluetooth.write(query);
+                                query = "";
+                                String[] queryResults = bluetooth.readNext().split("#"); // string from query handler has to be formatted "<int sentiment>#<String reply>"
+
+                                int sentimentIndex;
+                                if (condition.equals("1") || condition.equals("2")) //******** control or topics condition - need to get random sentiment
+                                {
+                                    sentimentIndex = rand.nextInt(3);
+                                }
+                                else
+                                {
+                                    sentimentIndex = Integer.parseInt(queryResults[0]) + 1; // sentiment must be -1=negative, 0=neutral, 1=positive
+                                }
+                                animateTo = expressions[sentimentIndex];
+
+                                String reply = queryResults[1];
+                                if (replies < 6) { // only 7 queries per conversation
+                                    say = reply;
+                                    replies++;
+                                } else {
+                                    say = reply + " Well thanks for the conversation. It was nice talking with you!";
+                                    modeToListen = normalListener;
+                                    step = 0;
+                                }
+                            }
+                            break;
+
+                    }
+
+                }
+
+                // Now either start listening for query again or exit and start listening for normal speech.
+                final Handler handler = new Handler();
+                final RecognitionListener mode = modeToListen;
+                final Runnable runnable = new Runnable() {
+                    public void run() {
+                        speechRecog.setRecognitionListener(mode);
+                        startListening();
+                    }
+                };
+                animateAndSpeak(animateTo, say); //animate
+                handler.postDelayed(runnable, 500); // start listening only AFTER animation and tts response are done
+
+            }
 
         }
+
     }
 
     // Helper methods that need to be outside of inner classes.
@@ -1004,7 +1040,7 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
     /**----------------------------------------------------------------------------------------------
      * Animate an expression transition from the current expression to the one indicated by the integer parameter.
      */
-    private void animate(Emotion emotion)
+    private void animateAndSpeak(Emotion emotion, String speech)
     {
         if (cameraMode)
         {
@@ -1045,49 +1081,41 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
 
         // Animate transition if currently showing an expression that is different from the target expression
         if (currentEmotion != emotion)  {
+
+            final String toSpeak = speech;
             imgvw.setBackgroundResource(EmotionalFace.transitions[currentEmotion.ordinal()][emotion.ordinal()]);
             AnimationDrawable transitionanimation = (AnimationDrawable) imgvw.getBackground();
+            currentEmotion = emotion;
 
-            currentEmotion = emotion; // Update current expression number
-
-            // Set up next static (blinking) expression to start after transition animation finishes
-            final Handler handler = new Handler();
-            final Runnable runnable = new Runnable() {
+            // Set up any speech, and the blinking animation in the new expression, to start when the transition ends
+            final Handler animationHandler = new Handler();
+            final Runnable onAnimationEnd = new Runnable() {
                 public void run() {
-                    animateThisExpression();
+                    speakOut(toSpeak);
+                    int staticAnimation;
+                    if (cameraMode)
+                    {
+                        staticAnimation = R.drawable.happy_camera;
+                    }
+                    else
+                    {
+                        staticAnimation = EmotionalFace.transitions[currentEmotion.ordinal()][currentEmotion.ordinal()];
+                    }
+                    imgvw.setBackgroundResource(staticAnimation);
+                    AnimationDrawable targetanimation = (AnimationDrawable) imgvw.getBackground();
+                    targetanimation.start();
                 }
             };
+            animationHandler.postDelayed(onAnimationEnd, 200); // start listening only AFTER animation and tts response are done
 
-            // Animate transition, then call animation for next blinking expression when it's done
+            // Animate transition
             transitionanimation.start();
-            handler.postDelayed(runnable, 250);
 
             // If currently showing an expression that is the same as target expression, just speak whatever response is ready.
         } else {		// Yes, it's kind of weird that it goes here, but it works.
-            speakOut(currentResponse);
+            //##### FIGURE OUT HOW TO MAKE SURE IT DOESN'T INTERRUPT A BLINK??
+            speakOut(speech);
         }
-    }
-
-
-    /**----------------------------------------------------------------------------------------------
-     * Helper method that animates the static (blinking) expression that corresponds to the currentExpression number.
-     */
-    private void animateThisExpression()
-    {
-        speakOut(currentResponse);
-        int staticAnimation;
-        if (cameraMode)
-        {
-            staticAnimation = R.drawable.happy_camera;
-        }
-        else
-        {
-            staticAnimation = EmotionalFace.transitions[currentEmotion.ordinal()][currentEmotion.ordinal()];
-        }
-        imgvw.setBackgroundResource(staticAnimation);
-        AnimationDrawable targetanimation = (AnimationDrawable) imgvw.getBackground();
-        targetanimation.start();
-
     }
 
     /**----------------------------------------------------------------------------------------------
@@ -1098,30 +1126,14 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
             tts.stop();
             tts.shutdown();
         }
-        if (speechRecogNormal != null)
+        if (speechRecog != null)
         {
-            speechRecogNormal.stopListening();
-            speechRecogNormal.cancel();
-            speechRecogNormal.destroy();
+            speechRecog.stopListening();
+            speechRecog.cancel();
+            speechRecog.destroy();
         }
-        if (speechRecogLearn != null)
-        {
-            speechRecogLearn.stopListening();
-            speechRecogLearn.cancel();
-            speechRecogLearn.destroy();
-        }
-        if (speechRecogCommand != null)
-        {
-            speechRecogCommand.stopListening();
-            speechRecogCommand.cancel();
-            speechRecogCommand.destroy();
-        }
-        if (speechRecogConvo != null)
-        {
-            speechRecogConvo.stopListening();
-            speechRecogConvo.cancel();
-            speechRecogConvo.destroy();
-        }
+        bluetooth.write("exit");
+        bluetooth.cancel();
         super.onDestroy();
     }
 
@@ -1155,10 +1167,9 @@ public class FaceActivity extends Activity implements TextToSpeech.OnInitListene
         tts.setPitch((float) speechPitch); //speechPitch is a global variable found at the top of the class. higher the number, the squeekier the voice
         tts.setSpeechRate((float) speechRate);//speechRate is a global variable. the high the number, the faster the speech
         tts.speak(toSpeak, TextToSpeech.QUEUE_FLUSH, null); //say whatever string is passed
-        while (tts.isSpeaking()) {
+        //while (tts.isSpeaking()) {
             // Do nothing while TTS is speaking
-        }
-        currentResponse = "";
+        //}
         timeCompletedSpeaking = System.currentTimeMillis();
     }
 

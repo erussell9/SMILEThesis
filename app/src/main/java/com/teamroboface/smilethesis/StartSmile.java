@@ -24,6 +24,10 @@ public class StartSmile extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_start_smile);
 
+        int duration1 = Toast.LENGTH_LONG;
+        Toast toast1 = Toast.makeText(this, "Make sure WiFi is connected!", duration1);
+        toast1.show();
+
         // Set up start button - when clicked, it starts face activity
         final View startButton = findViewById(R.id.startButton);
         startButton.setOnClickListener(new View.OnClickListener() {
@@ -36,6 +40,8 @@ public class StartSmile extends Activity {
                 //face_activity instead of returning to the home screen
             }
         });
+
+
 
         // Disable button and alert user if no recognition service is present
         PackageManager pm = getPackageManager();
